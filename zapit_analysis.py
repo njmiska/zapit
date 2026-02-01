@@ -9,22 +9,21 @@ receiving bilateral optogenetic stimulation at one of 52 cortical locations.
 Key analyses:
 - Reaction time effects by stimulation location
 - Bias shift effects (block-induced choice bias)
-- Lapse rate changes
-- Brain heatmap visualization on Allen CCF
 
 Usage:
-    1. Configure paths and options in config.py
+    1. Configure paths, options, and session filters in config.py
     2. Update session metadata in metadata_zapit.py
     3. Run this script: python zapit_analysis.py
 
-Author: [Your name]
+Author: Nate Miska
+        Developed with AI pair-programming assistance (Claude, Anthropic)
+        for code refactoring and documentation.
 """
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-import matplotlib.image as mpimg
 import seaborn as sns
 from datetime import datetime
 from scipy import stats
@@ -43,6 +42,10 @@ from config import (
     ONLY_LOW_CONTRASTS, LOW_CONTRAST_THRESHOLD,
     ALL_CONTRASTS, LOW_CONTRASTS, BIAS_HEATMAP_CONTRASTS,
     ALYX_BASE_URL, FLAG_FAILED_LOADS,
+    SESSION_FILTERS,
+    BREGMA_CCF, CCF_SCALE_FACTOR,
+    PLOT_AP_LIMITS, PLOT_ML_LIMITS,
+    SHOW_RIGHT_HEMISPHERE_ONLY,
 )
 from metadata_zapit import sessions, find_sessions_by_advanced_criteria
 from zapit_helpers import (
@@ -59,20 +62,19 @@ from zapit_helpers import (
 
 
 # =============================================================================
-# SESSION SELECTION
+# SESSION SELECTION (configured in config.py)
 # =============================================================================
 
-# Modify these filters to select sessions of interest
+# Filter out None values from session filters
+active_filters = {k: v for k, v in SESSION_FILTERS.items() if v is not None}
+
 eids, trials_ranges, MouseIDs, stim_params = find_sessions_by_advanced_criteria(
-    sessions,
-    Stimulation_Params='zapit',
-    # Add additional filters as needed:
-    # Mouse_ID='SWC_NM_099',
-    # Hemisphere='both',
-    # Pulse_Params='motor_bilateral_mask',
+    sessions, **active_filters
 )
 
 print(f"Found {len(eids)} sessions matching criteria")
+if active_filters:
+    print(f"Active filters: {active_filters}")
 
 
 # =============================================================================
@@ -314,62 +316,114 @@ print("\nGenerating figures...")
 # Set up figure directory
 FIGURE_SAVE_PATH.mkdir(parents=True, exist_ok=True)
 
+# Load Allen CCF
+print("  Loading Allen CCF data...")
+allenCCF_data = np.load(ALLEN_CCF_ANNOTATION)
+structure_tree = pd.read_csv(ALLEN_STRUCTURE_TREE)
+
+# Generate brain surface image with borders
+print("  Generating max intensity projection (this may take a moment)...")
+mip, edges = generate_mip_with_borders(allenCCF_data)
+
+# Create binary border image (white borders on black)
+dorsal_mip_with_borders = np.where(edges > 0, 1, 0)
+
+# Calculate the extents using original method (negative scale factor handles flip)
+bregma = BREGMA_CCF  # [AP, DV, ML]
+scale_factor = CCF_SCALE_FACTOR  # -100
+
+left_extent = -bregma[2] / scale_factor
+right_extent = (dorsal_mip_with_borders.shape[1] - bregma[2]) / scale_factor
+lower_extent = (dorsal_mip_with_borders.shape[0] - bregma[0]) / scale_factor
+upper_extent = -bregma[0] / scale_factor
+
+extent = [left_extent, right_extent, lower_extent, upper_extent]
+
 
 # -----------------------------------------------------------------------------
 # Figure 1: RT Heatmap on Brain Atlas
 # -----------------------------------------------------------------------------
 print("  Generating RT heatmap...")
 
-# Load Allen CCF
-allenCCF_data = np.load(ALLEN_CCF_ANNOTATION)
-structure_tree = pd.read_csv(ALLEN_STRUCTURE_TREE)
-
-# Generate brain surface image
-mip, edges = generate_mip_with_borders(allenCCF_data)
-
-# Create figure
 fig, ax = plt.subplots(figsize=(10, 8))
 
-# Show brain surface with edges
-edges_masked = np.ma.masked_where(edges == 0, edges)
-ax.imshow(mip, cmap='gray', alpha=0.3, extent=[0, mip.shape[1], mip.shape[0], 0])
-ax.imshow(edges_masked, cmap='binary', alpha=0.5, extent=[0, mip.shape[1], mip.shape[0], 0])
+# Show brain borders
+ax.imshow(dorsal_mip_with_borders, cmap='gray', extent=extent)
 
-# Set up colormap for RT effect sizes
-rt_effect_sizes = {c: rt_results[c]['effect_size'] for c in rt_results if c > 0 and 'effect_size' in rt_results[c]}
-if rt_effect_sizes:
-    min_effect = min(rt_effect_sizes.values())
-    max_effect = max(rt_effect_sizes.values())
-    norm = mcolors.Normalize(vmin=min_effect, vmax=max_effect)
-    cmap = plt.get_cmap('coolwarm')
-    
-    # Plot each stim location
-    for condition, coords in stim_locations.items():
-        if condition == 52 or condition not in rt_effect_sizes:
-            continue
-        
-        effect = rt_effect_sizes[condition]
-        color = cmap(norm(effect))
-        
-        ml_left = coords.get('ML_left')
-        ml_right = coords.get('ML_right')
-        ap = coords.get('AP')
-        
-        if ml_left is not None and ml_right is not None and ap is not None:
-            # Convert to CCF coordinates (approximate scaling)
-            # These conversions may need adjustment based on your coordinate system
-            ax.scatter(ml_left * 100 + 570, -ap * 100 + 540, color=color, s=100, edgecolors='black')
-            ax.scatter(ml_right * 100 + 570, -ap * 100 + 540, color=color, s=100, edgecolors='black')
-    
-    # Colorbar
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    cbar = plt.colorbar(sm, ax=ax)
-    cbar.set_label("Cohen's d (RT effect size)")
+# Compute mean RT and p-values for each condition
+rt_means = {}
+rt_pvals = {}
+ctrl_rts = [t['reaction_times'] for t in condition_data[0] if not np.isnan(t['reaction_times'])]
+ctrl_mean_rt = np.mean(ctrl_rts) if ctrl_rts else 1.0
 
-ax.set_title('Reaction Time Effect by Stimulation Location')
-ax.set_xlabel('ML Position')
-ax.set_ylabel('AP Position')
+for cond in range(1, NUM_STIM_LOCATIONS + 1):
+    stim_rts = [t['reaction_times'] for t in condition_data[cond] if not np.isnan(t['reaction_times'])]
+    if len(stim_rts) > 0:
+        rt_means[cond] = np.mean(stim_rts)
+        if len(ctrl_rts) > 0:
+            _, p = stats.ttest_ind(stim_rts, ctrl_rts, equal_var=False)
+            rt_pvals[cond] = p
+        else:
+            rt_pvals[cond] = 1.0
+
+# Set up colormap - using TwoSlopeNorm centered on control RT (matching original)
+from matplotlib import colors
+divnorm = colors.TwoSlopeNorm(
+    vmin=0.8*(ctrl_mean_rt),#ctrl_mean_rt - 0.4 * ctrl_mean_rt,
+    vcenter=ctrl_mean_rt,
+    vmax=1.5*(ctrl_mean_rt)
+)
+sm = plt.cm.ScalarMappable(cmap="coolwarm", norm=divnorm)
+
+# Plot each stim location (both hemispheres, control display with axis limits)
+for condition, coords in stim_locations.items():
+    if condition not in rt_means:
+        continue
+    
+    mean_rt = rt_means[condition]
+    p_val = rt_pvals.get(condition, 1.0)
+    
+    # Size based on -100 * log10(p_val) - matching original
+    size = -100 * np.log10(p_val) if p_val > 0 else 300
+    color = sm.to_rgba(mean_rt)
+    alpha = 0.5 if p_val >= 0.05 else 1.0
+    
+    ml_left = coords.get('ML_left')
+    ml_right = coords.get('ML_right')
+    ap = coords.get('AP')
+    
+    if ml_left is not None and ml_right is not None and ap is not None:
+        # Plot both hemispheres (axis limits will control what's visible)
+        ax.scatter(ml_left, ap, color=color, alpha=alpha, edgecolors='w', s=size)
+        ax.scatter(ml_right, ap, color=color, alpha=alpha, edgecolors='w', s=size)
+
+# Set axis limits
+if PLOT_AP_LIMITS is not None:
+    ax.set_ylim(bottom=PLOT_AP_LIMITS[0], top=PLOT_AP_LIMITS[1])
+if PLOT_ML_LIMITS is not None:
+    ax.set_xlim(left=PLOT_ML_LIMITS[0], right=PLOT_ML_LIMITS[1])
+elif SHOW_RIGHT_HEMISPHERE_ONLY:
+    ax.set_xlim(left=0)  # Show only right hemisphere (ML > 0)
+
+# Labels and title
+ax.set_xlabel('Mediolateral Position (mm from Bregma)', fontsize=14)
+ax.set_ylabel('Anteroposterior Position (mm from Bregma)', fontsize=14)
+ax.set_title(f'Reaction Time by Stimulation Location\n({num_analyzed_sessions} sessions, {num_unique_mice} mice)', fontsize=14)
+ax.tick_params(axis='both', which='major', labelsize=12)
+
+# P-value legend (matching original style)
+p_values_legend = [10e-8, 0.001, 0.05]
+sizes_legend = [-100 * np.log10(p) for p in p_values_legend]
+for p, size in zip(p_values_legend, sizes_legend):
+    ax.scatter([], [], s=size, label=f'p = {p}', edgecolors='w', color='black')
+ax.legend(loc='upper right', labelspacing=1.5, fontsize=10)
+
+# Colorbar
+cbar = plt.colorbar(sm, ax=ax, orientation='vertical', fraction=0.046, pad=0.04, aspect=12)
+cbar.set_label('Reaction time (s)', fontsize=14, labelpad=15)
+cbar.ax.tick_params(labelsize=12)
+
+plt.tight_layout()
 
 if SAVE_FIGURES:
     plt.savefig(FIGURE_SAVE_PATH / f'{FIGURE_PREFIX}_RT_heatmap.png', dpi=150, bbox_inches='tight')
@@ -378,198 +432,273 @@ else:
     plt.show()
 
 
-# -----------------------------------------------------------------------------
-# Figure 2: Bias Heatmap (P-value based)
-# -----------------------------------------------------------------------------
-print("  Generating bias p-value heatmap...")
+# # -----------------------------------------------------------------------------
+# # Figure 2: QP (Quiescent Period) Heatmap on Brain Atlas
+# # -----------------------------------------------------------------------------
+# print("  Generating QP heatmap...")
 
-# Compute p-values for block bias difference at low contrasts
-p_values = {}
-choices_by_condition = {cond: {'R_block': [], 'L_block': []} for cond in condition_data}
+# fig, ax = plt.subplots(figsize=(10, 8))
 
-for cond, trials_list in condition_data.items():
-    for trial in trials_list:
-        if trial['contrast'] in BIAS_HEATMAP_CONTRASTS:
-            block_type = 'R_block' if trial['probabilityLeft'] == 0.2 else 'L_block'
-            choices_by_condition[cond][block_type].append(trial['choice'])
+# # Show brain borders
+# ax.imshow(dorsal_mip_with_borders, cmap='gray', extent=extent)
 
-for cond, blocks in choices_by_condition.items():
-    if blocks['R_block'] and blocks['L_block']:
-        _, p_val = stats.ttest_ind(blocks['R_block'], blocks['L_block'])
-        p_values[cond] = p_val
-    else:
-        p_values[cond] = np.nan
+# # Compute mean QP and p-values for each condition (matching original script logic)
+# qp_means = {}
+# qp_pvals = {}
+# ctrl_qps = [t['qp_times'] for t in condition_data[0] if not np.isnan(t['qp_times'])]
+# ctrl_mean_qp = np.mean(ctrl_qps) if ctrl_qps else 0.5
 
-# Plot
-fig, ax = plt.subplots(figsize=(10, 8))
+# for cond in range(1, NUM_STIM_LOCATIONS + 1):
+#     stim_qps = [t['qp_times'] for t in condition_data[cond] if not np.isnan(t['qp_times'])]
+#     if len(stim_qps) > 0:
+#         qp_means[cond] = np.mean(stim_qps)
+#         if len(ctrl_qps) > 0:
+#             _, p = stats.ttest_ind(stim_qps, ctrl_qps, equal_var=False)
+#             qp_pvals[cond] = p
+#         else:
+#             qp_pvals[cond] = 1.0
 
-cmap = plt.get_cmap('coolwarm_r')
-log_p_values = {c: -np.log10(p) if p > 0 else 0 for c, p in p_values.items()}
+# # Set up colormap - matching original QP normalization
+# norm_qp = mcolors.Normalize(
+#     vmin=ctrl_mean_qp - 0.3 * ctrl_mean_qp,
+#     vmax=ctrl_mean_qp + 0.3 * ctrl_mean_qp
+# )
+# sm_qp = plt.cm.ScalarMappable(cmap="coolwarm", norm=norm_qp)
 
-min_log_p, max_log_p = 0.7, 9.5
-norm = mcolors.Normalize(vmin=min_log_p, vmax=max_log_p)
-
-for condition, coords in stim_locations.items():
-    if condition == 52:
-        continue
+# # Plot each stim location
+# for condition, coords in stim_locations.items():
+#     if condition not in qp_means:
+#         continue
     
-    log_p = log_p_values.get(condition, 0)
-    color = cmap(norm(log_p))
+#     mean_qp = qp_means[condition]
+#     p_val = qp_pvals.get(condition, 1.0)
     
-    ml_left = coords.get('ML_left')
-    ml_right = coords.get('ML_right')
-    ap = coords.get('AP')
+#     # Size based on -100 * log10(p_val) - matching original
+#     size = -100 * np.log10(p_val) if p_val > 0 else 300
+#     color = sm_qp.to_rgba(mean_qp)
+#     alpha = 0.5 if p_val >= 0.05 else 1.0
     
-    if ml_left is not None and ml_right is not None and ap is not None:
-        ax.scatter(ml_left, ap, color=color, s=100, edgecolors='black')
-        ax.scatter(ml_right, ap, color=color, s=100, edgecolors='black')
-
-sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-sm.set_array([])
-cbar = plt.colorbar(sm, ax=ax)
-cbar.set_label('-log10(P-value)')
-
-ax.set_title('Block Bias Difference: -log10(P-value) by Location')
-ax.set_xlabel('Mediolateral Position')
-ax.set_ylabel('Anteroposterior Position')
-
-if SAVE_FIGURES:
-    plt.savefig(FIGURE_SAVE_PATH / f'{FIGURE_PREFIX}_bias_pval_heatmap.png', dpi=150, bbox_inches='tight')
-    plt.close()
-else:
-    plt.show()
-
-
-# -----------------------------------------------------------------------------
-# Figure 3: Effect Size Heatmap
-# -----------------------------------------------------------------------------
-print("  Generating effect size heatmap...")
-
-fig, ax = plt.subplots(figsize=(10, 8))
-
-cmap = plt.get_cmap('RdBu_r')
-if effect_sizes:
-    es_values = list(effect_sizes.values())
-    max_abs = max(abs(min(es_values)), abs(max(es_values)))
-    norm = mcolors.Normalize(vmin=-max_abs, vmax=max_abs)
+#     ml_left = coords.get('ML_left')
+#     ml_right = coords.get('ML_right')
+#     ap = coords.get('AP')
     
-    for condition, coords in stim_locations.items():
-        if condition == 52 or condition not in effect_sizes:
-            continue
+#     if ml_left is not None and ml_right is not None and ap is not None:
+#         ax.scatter(ml_left, ap, color=color, alpha=alpha, edgecolors='w', s=size)
+#         ax.scatter(ml_right, ap, color=color, alpha=alpha, edgecolors='w', s=size)
+
+# # Set axis limits
+# if PLOT_AP_LIMITS is not None:
+#     ax.set_ylim(bottom=PLOT_AP_LIMITS[0], top=PLOT_AP_LIMITS[1])
+# if PLOT_ML_LIMITS is not None:
+#     ax.set_xlim(left=PLOT_ML_LIMITS[0], right=PLOT_ML_LIMITS[1])
+# elif SHOW_RIGHT_HEMISPHERE_ONLY:
+#     ax.set_xlim(left=0)
+
+# # Labels and title
+# ax.set_xlabel('Mediolateral Position (mm from Bregma)', fontsize=14)
+# ax.set_ylabel('Anteroposterior Position (mm from Bregma)', fontsize=14)
+# ax.set_title(f'Quiescent Period by Stimulation Location\n({num_analyzed_sessions} sessions, {num_unique_mice} mice)', fontsize=14)
+# ax.tick_params(axis='both', which='major', labelsize=12)
+
+# # P-value legend (matching RT style)
+# p_values_legend = [0.001, 0.05, 0.2]
+# sizes_legend = [-100 * np.log10(p) for p in p_values_legend]
+# for p, size in zip(p_values_legend, sizes_legend):
+#     ax.scatter([], [], s=size, label=f'p = {p}', edgecolors='w', color='black')
+# ax.legend(loc='upper right', labelspacing=1.5, fontsize=10)
+
+# # Colorbar
+# cbar = plt.colorbar(sm_qp, ax=ax, orientation='vertical', fraction=0.046, pad=0.04, aspect=12)
+# cbar.set_label('Quiescent Period (s)', fontsize=14, labelpad=15)
+# cbar.ax.tick_params(labelsize=12)
+
+# plt.tight_layout()
+
+# if SAVE_FIGURES:
+#     plt.savefig(FIGURE_SAVE_PATH / f'{FIGURE_PREFIX}_QP_heatmap.png', dpi=150, bbox_inches='tight')
+#     plt.close()
+# else:
+#     plt.show()
+
+
+# # -----------------------------------------------------------------------------
+# # Figure 3: Bias Reduction Heatmap
+# # -----------------------------------------------------------------------------
+# print("  Generating bias reduction heatmap...")
+
+# # Compute bias values per cycle for each condition (matching original bias_vals_LC logic)
+# # Bias = mean(L block choices) - mean(R block choices) at low contrasts
+# # This quantifies block bias - positive values mean more leftward choices in L block
+
+# import math
+
+# bias_vals_by_condition = {cond: np.array([]) for cond in range(NUM_STIM_LOCATIONS + 1)}
+
+# for condition in range(NUM_STIM_LOCATIONS + 1):
+#     # Filter for low contrast trials in each block
+#     # Using absolute contrast < LOW_CONTRAST_THRESHOLD
+#     data_Lblock = [t for t in condition_data[condition] 
+#                    if abs(t['contrast']) < LOW_CONTRAST_THRESHOLD and t['probabilityLeft'] == 0.8]
+#     data_Rblock = [t for t in condition_data[condition] 
+#                    if abs(t['contrast']) < LOW_CONTRAST_THRESHOLD and t['probabilityLeft'] == 0.2]
+    
+#     # Determine number of complete cycles
+#     num_cycles = min(len(data_Lblock), len(data_Rblock)) // TRIALS_PER_DATAPOINT
+    
+#     if num_cycles == 0:
+#         continue
+    
+#     bias_vals = np.empty(num_cycles)
+#     bias_vals[:] = np.nan
+    
+#     for k in range(num_cycles):
+#         start_idx = k * TRIALS_PER_DATAPOINT
+#         end_idx = (k + 1) * TRIALS_PER_DATAPOINT
         
-        es = effect_sizes[condition]
-        color = cmap(norm(es))
+#         choices_L = [t['choice'] for t in data_Lblock[start_idx:end_idx]]
+#         choices_R = [t['choice'] for t in data_Rblock[start_idx:end_idx]]
         
-        ml_left = coords.get('ML_left')
-        ml_right = coords.get('ML_right')
-        ap = coords.get('AP')
+#         mean_L = np.mean(choices_L)
+#         mean_R = np.mean(choices_R)
+#         bias_vals[k] = mean_L - mean_R  # Positive = more leftward in L block
+    
+#     bias_vals_by_condition[condition] = bias_vals
+
+# # Control bias statistics (for normalization)
+# ctrl_bias_vals = bias_vals_by_condition[0]
+# ctrl_mean_bias = np.mean(ctrl_bias_vals) if len(ctrl_bias_vals) > 0 else 0
+# ctrl_abs_mean_bias = np.abs(ctrl_mean_bias)
+
+# # Compute effect size (bias reduction) and p-value for each stim condition vs control
+# bias_reduction = {}  # Normalized reduction: 0 = no change, 1 = complete elimination of bias
+# bias_pvals = {}
+
+# for cond in range(1, NUM_STIM_LOCATIONS + 1):
+#     stim_bias_vals = bias_vals_by_condition[cond]
+    
+#     if len(stim_bias_vals) > 0 and len(ctrl_bias_vals) > 0:
+#         # Independent t-test: stim vs control bias values
+#         _, p_val = stats.ttest_ind(ctrl_bias_vals, stim_bias_vals)
+#         bias_pvals[cond] = p_val
         
-        if ml_left is not None and ml_right is not None and ap is not None:
-            ax.scatter(ml_left, ap, color=color, s=100, edgecolors='black')
-            ax.scatter(ml_right, ap, color=color, s=100, edgecolors='black')
+#         # Compute bias reduction as fraction of control bias eliminated
+#         # Positive value = bias reduced; 1 = bias eliminated; 0 = no change; negative = bias increased
+#         stim_mean_bias = np.mean(stim_bias_vals)
+        
+#         if ctrl_abs_mean_bias > 0:
+#             # Reduction = (ctrl - stim) / ctrl, but we want magnitude reduction
+#             # If ctrl_bias is positive (leftward bias in L block), reduction means stim_bias is smaller
+#             bias_reduction[cond] = (np.abs(ctrl_mean_bias) - np.abs(stim_mean_bias)) / ctrl_abs_mean_bias
+#         else:
+#             bias_reduction[cond] = 0
+
+# # Plot with same style as RT/QP heatmaps
+# fig, ax = plt.subplots(figsize=(10, 8))
+
+# # Show brain borders
+# ax.imshow(dorsal_mip_with_borders, cmap='gray', extent=extent)
+
+# # Set up colormap: blue = no reduction (0), red = full reduction (1)
+# # Using 'coolwarm' so blue is low values, red is high values
+# cmap_bias = plt.get_cmap('coolwarm')
+
+# # Normalize based on data range, centered appropriately
+# # Clip to reasonable range (some might be negative if bias increased, or >1 if stim reverses bias)
+# reduction_values = [v for v in bias_reduction.values() if not np.isnan(v)]
+# if reduction_values:
+#     min_red = min(min(reduction_values), -0.2)  # Allow some negative (bias increase)
+#     max_red = max(max(reduction_values), 0.8)   # Cap at reasonable maximum
+# else:
+#     min_red, max_red = -0.2, 0.8
+
+# norm_bias = mcolors.Normalize(vmin=min_red, vmax=max_red)
+
+# # Plot each stim location
+# for condition, coords in stim_locations.items():
+#     if condition == 52:  # Skip condition 52 as in original
+#         continue
+#     if condition not in bias_pvals or np.isnan(bias_pvals.get(condition, np.nan)):
+#         continue
     
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    cbar = plt.colorbar(sm, ax=ax)
-    cbar.set_label('Effect Size (normalized bias change)')
-
-ax.set_title('Bias Shift Effect Size by Location')
-ax.set_xlabel('Mediolateral Position')
-ax.set_ylabel('Anteroposterior Position')
-
-if SAVE_FIGURES:
-    plt.savefig(FIGURE_SAVE_PATH / f'{FIGURE_PREFIX}_effect_size_heatmap.png', dpi=150, bbox_inches='tight')
-    plt.close()
-else:
-    plt.show()
-
-
-# -----------------------------------------------------------------------------
-# Figure 4: Summary Statistics
-# -----------------------------------------------------------------------------
-print("  Generating summary statistics figure...")
-
-fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-
-# Control vs Stim RT comparison (pooled)
-ax1 = axes[0]
-ctrl_rt = [t['reaction_times'] for t in condition_data[0] if not np.isnan(t['reaction_times'])]
-all_stim_rt = []
-for c in range(1, 53):
-    all_stim_rt.extend([t['reaction_times'] for t in condition_data[c] if not np.isnan(t['reaction_times'])])
-
-if ctrl_rt and all_stim_rt:
-    _, p_rt = stats.mannwhitneyu(ctrl_rt, all_stim_rt)
-    ax1.bar([0, 1], [np.mean(ctrl_rt), np.mean(all_stim_rt)], 
-            color=['gray', 'steelblue'], tick_label=['Control', 'Stim'])
-    ax1.errorbar([0, 1], [np.mean(ctrl_rt), np.mean(all_stim_rt)],
-                 yerr=[stats.sem(ctrl_rt), stats.sem(all_stim_rt)], 
-                 fmt='none', color='black', capsize=5)
-    ax1.set_ylabel('Reaction Time (s)')
-    ax1.set_title(f'RT Comparison\np = {p_rt:.3g}')
-
-# Control vs Stim QP comparison (pooled)
-ax2 = axes[1]
-ctrl_qp = [t['qp_times'] for t in condition_data[0] if not np.isnan(t['qp_times'])]
-all_stim_qp = []
-for c in range(1, 53):
-    all_stim_qp.extend([t['qp_times'] for t in condition_data[c] if not np.isnan(t['qp_times'])])
-
-if ctrl_qp and all_stim_qp:
-    _, p_qp = stats.mannwhitneyu(ctrl_qp, all_stim_qp)
-    ax2.bar([0, 1], [np.mean(ctrl_qp), np.mean(all_stim_qp)],
-            color=['gray', 'steelblue'], tick_label=['Control', 'Stim'])
-    ax2.errorbar([0, 1], [np.mean(ctrl_qp), np.mean(all_stim_qp)],
-                 yerr=[stats.sem(ctrl_qp), stats.sem(all_stim_qp)],
-                 fmt='none', color='black', capsize=5)
-    ax2.set_ylabel('Quiescent Period (s)')
-    ax2.set_title(f'QP Comparison\np = {p_qp:.3g}')
-
-# Bias shift summary (cycles)
-ax3 = axes[2]
-ctrl_bias = bias_vals_LC[0]
-all_stim_bias = np.concatenate([bias_vals_LC[c] for c in range(1, 53) if len(bias_vals_LC[c]) > 0])
-
-if len(ctrl_bias) > 0 and len(all_stim_bias) > 0:
-    _, p_bias = stats.ttest_ind(ctrl_bias, all_stim_bias)
-    ax3.bar([0, 1], [np.mean(ctrl_bias), np.mean(all_stim_bias)],
-            color=['gray', 'steelblue'], tick_label=['Control', 'Stim'])
-    ax3.errorbar([0, 1], [np.mean(ctrl_bias), np.mean(all_stim_bias)],
-                 yerr=[stats.sem(ctrl_bias), stats.sem(all_stim_bias)],
-                 fmt='none', color='black', capsize=5)
-    ax3.set_ylabel('Bias (L-R block choice diff)')
-    ax3.set_title(f'Bias Comparison\np = {p_bias:.3g}')
-
-plt.tight_layout()
-
-if SAVE_FIGURES:
-    plt.savefig(FIGURE_SAVE_PATH / f'{FIGURE_PREFIX}_summary_stats.png', dpi=150, bbox_inches='tight')
-    plt.close()
-else:
-    plt.show()
-
-
-# =============================================================================
-# SAVE RESULTS
-# =============================================================================
-
-if SAVE_FIGURES:
-    print("\nSaving analysis results...")
+#     reduction = bias_reduction.get(condition, 0)
+#     p_val = bias_pvals[condition]
     
-    # Save bias arrays for further analysis
-    np.save(FIGURE_SAVE_PATH / f'{FIGURE_PREFIX}_bias_vals_LC_control.npy', bias_vals_LC[0])
+#     color = cmap_bias(norm_bias(reduction))
     
-    # Save effect sizes
-    effect_size_df = pd.DataFrame([
-        {'condition': c, 'effect_size': es, 
-         'rt_effect': rt_results.get(c, {}).get('effect_size', np.nan),
-         'rt_pval': rt_results.get(c, {}).get('p_val', np.nan),
-         'bias_pval_ind': cycle_stats['ttest_ind'].get(c, np.nan)}
-        for c, es in effect_sizes.items()
-    ])
-    effect_size_df.to_csv(FIGURE_SAVE_PATH / f'{FIGURE_PREFIX}_results.csv', index=False)
+#     # Size based on -100 * log10(p_val) - matching RT/QP style
+#     size = -100 * np.log10(p_val) if p_val > 0 else 300
+#     alpha = 0.5 if p_val >= 0.05 else 1.0
     
-    print(f"Results saved to {FIGURE_SAVE_PATH}")
+#     ml_left = coords.get('ML_left')
+#     ml_right = coords.get('ML_right')
+#     ap = coords.get('AP')
+    
+#     if ml_left is not None and ml_right is not None and ap is not None:
+#         ax.scatter(ml_left, ap, color=color, alpha=alpha, s=size, edgecolors='w')
+#         ax.scatter(ml_right, ap, color=color, alpha=alpha, s=size, edgecolors='w')
+
+# # Set axis limits
+# if PLOT_AP_LIMITS is not None:
+#     ax.set_ylim(bottom=PLOT_AP_LIMITS[0], top=PLOT_AP_LIMITS[1])
+# if PLOT_ML_LIMITS is not None:
+#     ax.set_xlim(left=PLOT_ML_LIMITS[0], right=PLOT_ML_LIMITS[1])
+# elif SHOW_RIGHT_HEMISPHERE_ONLY:
+#     ax.set_xlim(left=0)
+
+# # Labels and title
+# ax.set_xlabel('Mediolateral Position (mm from Bregma)', fontsize=14)
+# ax.set_ylabel('Anteroposterior Position (mm from Bregma)', fontsize=14)
+# ax.set_title(f'Block Bias Reduction by Stimulation Location\n({num_analyzed_sessions} sessions, {num_unique_mice} mice)', fontsize=14)
+# ax.tick_params(axis='both', which='major', labelsize=12)
+
+# # P-value legend (matching RT/QP style)
+# p_values_legend = [0.001, 0.05, 0.2]
+# sizes_legend = [-100 * np.log10(p) for p in p_values_legend]
+# for p, size in zip(p_values_legend, sizes_legend):
+#     ax.scatter([], [], s=size, label=f'p = {p}', edgecolors='w', color='black')
+# ax.legend(loc='upper right', labelspacing=1.5, fontsize=10)
+
+# # Colorbar
+# sm_bias = plt.cm.ScalarMappable(cmap=cmap_bias, norm=norm_bias)
+# sm_bias.set_array([])
+# cbar = plt.colorbar(sm_bias, ax=ax, orientation='vertical', fraction=0.046, pad=0.04, aspect=12)
+# cbar.set_label('Bias Reduction (fraction of control)', fontsize=14, labelpad=15)
+# cbar.ax.tick_params(labelsize=12)
+
+# plt.tight_layout()
+
+# if SAVE_FIGURES:
+#     plt.savefig(FIGURE_SAVE_PATH / f'{FIGURE_PREFIX}_bias_reduction_heatmap.png', dpi=150, bbox_inches='tight')
+#     plt.close()
+# else:
+#     plt.show()
+
+
+# # =============================================================================
+# # SAVE RESULTS
+# # =============================================================================
+
+# if SAVE_FIGURES:
+#     print("\nSaving analysis results...")
+    
+#     # Save bias arrays for further analysis
+#     np.save(FIGURE_SAVE_PATH / f'{FIGURE_PREFIX}_bias_vals_LC_control.npy', bias_vals_by_condition[0])
+    
+#     # Save effect sizes and statistics (including QP and bias reduction data)
+#     effect_size_df = pd.DataFrame([
+#         {'condition': c, 
+#          'effect_size': effect_sizes.get(c, np.nan),
+#          'rt_mean': rt_means.get(c, np.nan),
+#          'rt_pval': rt_pvals.get(c, np.nan),
+#          'qp_mean': qp_means.get(c, np.nan),
+#          'qp_pval': qp_pvals.get(c, np.nan),
+#          'bias_reduction': bias_reduction.get(c, np.nan),
+#          'bias_pval': bias_pvals.get(c, np.nan)}
+#         for c in range(1, NUM_STIM_LOCATIONS + 1)
+#     ])
+#     effect_size_df.to_csv(FIGURE_SAVE_PATH / f'{FIGURE_PREFIX}_results.csv', index=False)
+    
+#     print(f"Results saved to {FIGURE_SAVE_PATH}")
 
 
 print("\n" + "="*60)

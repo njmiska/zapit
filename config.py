@@ -7,6 +7,7 @@ This file contains all configurable parameters including:
 - Plotting options
 """
 
+import numpy as np
 from pathlib import Path
 
 # =============================================================================
@@ -14,13 +15,13 @@ from pathlib import Path
 # =============================================================================
 
 # Base directory for the project (update this to your local path)
-BASE_DIR = Path('/Users/natemiska/python/bias_coding')
+BASE_DIR = Path('/Users/natemiska/python/zapit')
 
 # Zapit trial log file
 ZAPIT_TRIALS_LOG = BASE_DIR / 'zapit_trials.yml'
 
 # Zapit stimulation locations log (contains AP/ML coordinates)
-ZAPIT_LOCATIONS_LOG = BASE_DIR / 'zapit_log_2024_02_28__12-41.yml'
+ZAPIT_LOCATIONS_LOG = BASE_DIR / 'zapit_log.yml'
 
 # Allen CCF atlas data (download from Allen Institute)
 # See: https://download.alleninstitute.org/informatics-archive/current-release/mouse_ccf/
@@ -28,7 +29,7 @@ ALLEN_CCF_ANNOTATION = Path('/Users/natemiska/python/Allen/annotation_volume_10u
 ALLEN_STRUCTURE_TREE = Path('/Users/natemiska/python/Allen/structure_tree_safe_2017.csv')
 
 # Output directory for figures
-FIGURE_SAVE_PATH = Path('/Users/natemiska/Desktop/other_figures/CP/')
+FIGURE_SAVE_PATH = Path('/Users/natemiska/Desktop/zapit_check')
 
 # =============================================================================
 # SESSION FILTERING THRESHOLDS
@@ -116,3 +117,70 @@ BIAS_HEATMAP_CONTRASTS = [-6.25, 0, 6.25]
 
 # IBL Alyx database URL
 ALYX_BASE_URL = 'https://alyx.internationalbrainlab.org'
+
+
+# =============================================================================
+# SESSION SELECTION CRITERIA
+# =============================================================================
+# These filters are passed to find_sessions_by_advanced_criteria()
+# Use None to not filter on that criterion
+# Use a specific value for exact match
+# Use a lambda for custom filtering, e.g.: lambda x: x in ['val1', 'val2']
+
+SESSION_FILTERS = {
+
+    'Stimulation_Params': 'zapit',      
+    # Required for Zapit analysis
+
+    'Mouse_ID': lambda x: x in ['SWC_NM_072', 'SWC_NM_071', 'SWC_NM_057', 'SWC_NM_058', 'SWC_NM_081', 'SWC_NM_082', 'SWC_NM_085', 'SWC_NM_086', 'SWC_NM_090', 'SWC_NM_091'],                    
+    # e.g., 'SWC_NM_099' or lambda x: x in [...]
+    
+    'Hemisphere': None,                  
+    # e.g., 'both', 'left', 'right'
+
+    'Pulse_Params': None,                
+    # e.g., 'motor_bilateral_mask', '50hz'
+
+    'Opsin': None,                       
+    # e.g., 'ChR2', 'GtACR2'
+
+    'Genetic_Line': None,                
+    # e.g., 'VGAT-ChR2', 'D1-Cre'
+
+    'Brain_Region': 'motor_bilateral',                
+    # e.g., 'motor_bilateral'
+
+    'Laser_V': None,                     
+    # e.g., 2, or lambda x: x >= 1
+
+    'Date': None,                        
+    # e.g., '2024-10-24'
+
+    'EID': None,                         
+    # Specific session EID(s)
+}
+
+
+# =============================================================================
+# PLOTTING CONFIGURATION
+# =============================================================================
+
+# Brain atlas display settings
+BRAIN_BACKGROUND_COLOR = 'black'
+BRAIN_BORDER_COLOR = 'white'
+
+# Bregma position in CCF coordinates (for 10um resolution)
+# Format: [AP, DV, ML] - matching original script
+BREGMA_CCF = np.array([540, 0, 570])
+
+# Scale factor (negative to handle coordinate flip)
+CCF_SCALE_FACTOR = -100
+
+# Axis limits for plotting (mm from Bregma)
+# Set to None to auto-scale, or specify [min, max]
+PLOT_AP_LIMITS = (-1.3, 3.8)      # AP extent (negative = posterior)
+PLOT_ML_LIMITS = (0, 3.8)          # ML extent (None = show full width, or e.g., (0, 5) for right hemisphere only)
+
+# Whether to show only right hemisphere data points
+# If True, only plots ML > 0 (but still shows full brain if PLOT_ML_LIMITS is None)
+SHOW_RIGHT_HEMISPHERE_ONLY = True
