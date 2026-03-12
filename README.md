@@ -26,14 +26,6 @@ pip install numpy pandas matplotlib seaborn scipy
 pip install ONE-api ibllib  # IBL data access
 ```
 
-### Allen CCF Atlas Data
-
-Download the annotation volume from the Allen Institute:
-1. Go to: https://download.alleninstitute.org/informatics-archive/current-release/mouse_ccf/
-2. Download `annotation_volume_10um.npy`
-3. Download `structure_tree_safe_2017.csv`
-4. Update paths in `config.py`
-
 ## File Structure
 
 ```
@@ -56,7 +48,6 @@ BASE_DIR = Path('/your/path/to/project')
 ZAPIT_TRIALS_LOG = BASE_DIR / 'zapit_trials.yml'
 ZAPIT_LOCATIONS_LOG = BASE_DIR / 'zapit_log_YYYY_MM_DD__HH-MM.yml'
 ALLEN_CCF_ANNOTATION = Path('/path/to/annotation_volume_10um.npy')
-ALLEN_STRUCTURE_TREE = Path('/path/to/structure_tree_safe_2017.csv')
 FIGURE_SAVE_PATH = Path('/path/to/output/figures')
 ```
 

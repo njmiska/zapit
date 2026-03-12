@@ -19,20 +19,19 @@ Author: Nate Miska
         Developed with AI pair-programming assistance (Claude, Anthropic)
         for code refactoring and documentation.
 """
-
+import nrrd
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-import seaborn as sns
 from datetime import datetime
 from scipy import stats
 from one.api import ONE
+from iblatlas.atlas import AllenAtlas, _download_atlas_allen
 
 # Local imports
 from config import (
-    ZAPIT_TRIALS_LOG, ZAPIT_LOCATIONS_LOG,
-    ALLEN_CCF_ANNOTATION, ALLEN_STRUCTURE_TREE,
+    ZAPIT_TRIALS_LOG, ZAPIT_LOCATIONS_LOG, ALLEN_CCF_ANNOTATION,
     FIGURE_SAVE_PATH, FIGURE_PREFIX, SAVE_FIGURES,
     BASELINE_PERFORMANCE_THRESHOLD, STIM_PERFORMANCE_THRESHOLD,
     MIN_BIAS_THRESHOLD_ZAPIT, RT_THRESHOLD, MIN_NUM_TRIALS,
@@ -107,39 +106,39 @@ print("="*60 + "\n")
 
 for j, eid in enumerate(eids):
     print(f"Processing session {j+1}/{len(eids)}: {eid}")
-    
+
     # -------------------------------------------------------------------------
     # Load session data
     # -------------------------------------------------------------------------
     trials, wheel = load_session_data(one, eid, flag_failed_loads=FLAG_FAILED_LOADS)
     if trials is None:
         continue
-    
+
     laser_intervals = load_laser_intervals(one, eid)
     current_mouse_id = MouseIDs[j]
-    
+
     # -------------------------------------------------------------------------
     # Determine valid trial range
     # -------------------------------------------------------------------------
     num_trials = len(trials['contrastLeft'])
     trials_range = get_valid_trials_range(trials_ranges[j], num_trials)
-    
+
     if len(trials_range) < MIN_NUM_TRIALS:
         print(f"  Skipping: Only {len(trials_range)} trials (minimum: {MIN_NUM_TRIALS})")
         continue
-    
+
     # -------------------------------------------------------------------------
     # Parse Zapit log and build stim location mapping
     # -------------------------------------------------------------------------
     details = one.get_details(eid)
     session_start = datetime.strptime(details['start_time'][:19], '%Y-%m-%dT%H:%M:%S')
-    
+
     relevant_events = parse_zapit_log(ZAPIT_TRIALS_LOG, session_start, eid)
-    
+
     stimtrial_location_dict = build_stim_location_dict(
         laser_intervals, trials, relevant_events, trials_range, eid
     )
-    
+
     # Handle "trials after stim" analysis mode
     if USE_TRIALS_AFTER_STIM:
         stimtrial_location_dict_original = stimtrial_location_dict.copy()
@@ -147,60 +146,60 @@ for j, eid in enumerate(eids):
             k + 1: v for k, v in stimtrial_location_dict.items()
             if min(trials_range) <= k < max(trials_range)
         }
-    
+
     # -------------------------------------------------------------------------
     # Session quality check: accuracy at high contrasts
     # -------------------------------------------------------------------------
     # Get control trials for quality check
     control_trial_nums = [t for t, c in stimtrial_location_dict.items() if c == 0]
-    
+
     contrast_values = signed_contrast(trials)
     session_control_data = []
-    
+
     for trial_num in control_trial_nums:
         trial_data = create_trial_data_dict(trials, trial_num, contrast_values)
         if trial_data['reaction_times'] <= RT_THRESHOLD and not np.isnan(trial_data['reaction_times']):
             session_control_data.append(trial_data)
-    
+
     passes_accuracy, accuracy = check_session_accuracy(
         session_control_data, BASELINE_PERFORMANCE_THRESHOLD
     )
     if not passes_accuracy:
         print(f"  Skipping: Accuracy {accuracy:.2f} below threshold {BASELINE_PERFORMANCE_THRESHOLD}")
         continue
-    
+
     # -------------------------------------------------------------------------
     # Session quality check: bias shift
     # -------------------------------------------------------------------------
     total_bias_shift = compute_session_bias_shift(session_control_data)
     print(f"  Accuracy: {accuracy:.2f}, Bias shift: {total_bias_shift:.2f}")
-    
+
     if total_bias_shift < MIN_BIAS_THRESHOLD_ZAPIT:
         print(f"  Skipping: Bias shift below threshold {MIN_BIAS_THRESHOLD_ZAPIT}")
         continue
-    
+
     # -------------------------------------------------------------------------
     # Collect trial data for all conditions
     # -------------------------------------------------------------------------
     whlpos, whlt = wheel.position, wheel.timestamps
-    
+
     for trial_num, condition_num in stimtrial_location_dict.items():
         # Skip trials that don't meet RT criteria
         trial_data = create_trial_data_dict(trials, trial_num, contrast_values)
-        
+
         if np.isnan(trial_data['reaction_times']):
             continue
         if trial_data['reaction_times'] > RT_THRESHOLD:
             continue
-        
+
         # Optional: filter for low contrasts only
         if ONLY_LOW_CONTRASTS:
             if abs(trial_data['contrast']) > LOW_CONTRAST_THRESHOLD:
                 continue
-        
+
         # Add to condition data
         condition_data[condition_num].append(trial_data)
-        
+
         # Extract wheel trajectory
         if wheel is not None:
             trajectory = extract_wheel_trajectory(
@@ -209,7 +208,7 @@ for j, eid in enumerate(eids):
                 duration=WHEEL_ANALYSIS_DURATION,
                 interval=WHEEL_TIME_INTERVAL
             )
-            
+
             # Store by block type
             if trial_data['probabilityLeft'] == 0.2:  # R block
                 if len(Rblock_wheel_by_condition[condition_num]) == 0:
@@ -225,13 +224,13 @@ for j, eid in enumerate(eids):
                     Lblock_wheel_by_condition[condition_num] = np.vstack([
                         Lblock_wheel_by_condition[condition_num], trajectory
                     ])
-    
+
     # Update session counters
     num_analyzed_sessions += 1
     if current_mouse_id != previous_mouse_id:
         num_unique_mice += 1
         previous_mouse_id = current_mouse_id
-    
+
     print(f"  ✓ Session added (Control: {len(condition_data[0])} trials)")
 
 
@@ -263,7 +262,7 @@ bias_values, left_block_probs, right_block_probs = compute_bias_values_by_contra
 
 # Bias by trial cycles (for independent comparisons)
 bias_vals_LC = compute_bias_values_by_cycle(
-    condition_data, 
+    condition_data,
     trials_per_cycle=TRIALS_PER_DATAPOINT,
     low_contrast_threshold=LOW_CONTRAST_THRESHOLD,
     num_conditions=NUM_STIM_LOCATIONS + 1
@@ -313,13 +312,16 @@ stim_locations = load_stim_locations_coordinates(ZAPIT_LOCATIONS_LOG)
 
 print("\nGenerating figures...")
 
-# Set up figure directory
-FIGURE_SAVE_PATH.mkdir(parents=True, exist_ok=True)
-
 # Load Allen CCF
 print("  Loading Allen CCF data...")
-allenCCF_data = np.load(ALLEN_CCF_ANNOTATION)
-structure_tree = pd.read_csv(ALLEN_STRUCTURE_TREE)
+if ALLEN_CCF_ANNOTATION and ALLEN_CCF_ANNOTATION.endswith('.npy'):
+    allenCCF_data = np.load(ALLEN_CCF_ANNOTATION)
+else:
+    atlas_path = ALLEN_CCF_ANNOTATION or (one.cache_dir / AllenAtlas.atlas_rel_path / f'annotation_10.nrrd')
+    if not atlas_path.exists():
+        atlas_path = _download_atlas_allen(atlas_path)
+    allenCCF_data, _ = nrrd.read(atlas_path)
+
 
 # Generate brain surface image with borders
 print("  Generating max intensity projection (this may take a moment)...")
@@ -379,19 +381,19 @@ sm = plt.cm.ScalarMappable(cmap="coolwarm", norm=divnorm)
 for condition, coords in stim_locations.items():
     if condition not in rt_means:
         continue
-    
+
     mean_rt = rt_means[condition]
     p_val = rt_pvals.get(condition, 1.0)
-    
+
     # Size based on -100 * log10(p_val) - matching original
     size = -100 * np.log10(p_val) if p_val > 0 else 300
     color = sm.to_rgba(mean_rt)
     alpha = 0.5 if p_val >= 0.05 else 1.0
-    
+
     ml_left = coords.get('ML_left')
     ml_right = coords.get('ML_right')
     ap = coords.get('AP')
-    
+
     if ml_left is not None and ml_right is not None and ap is not None:
         # Plot both hemispheres (axis limits will control what's visible)
         ax.scatter(ml_left, ap, color=color, alpha=alpha, edgecolors='w', s=size)
@@ -426,6 +428,8 @@ cbar.ax.tick_params(labelsize=12)
 plt.tight_layout()
 
 if SAVE_FIGURES:
+    # Set up figure directory
+    FIGURE_SAVE_PATH.mkdir(parents=True, exist_ok=True)
     plt.savefig(FIGURE_SAVE_PATH / f'{FIGURE_PREFIX}_RT_heatmap.png', dpi=150, bbox_inches='tight')
     plt.close()
 else:
@@ -469,19 +473,19 @@ else:
 # for condition, coords in stim_locations.items():
 #     if condition not in qp_means:
 #         continue
-    
+
 #     mean_qp = qp_means[condition]
 #     p_val = qp_pvals.get(condition, 1.0)
-    
+
 #     # Size based on -100 * log10(p_val) - matching original
 #     size = -100 * np.log10(p_val) if p_val > 0 else 300
 #     color = sm_qp.to_rgba(mean_qp)
 #     alpha = 0.5 if p_val >= 0.05 else 1.0
-    
+
 #     ml_left = coords.get('ML_left')
 #     ml_right = coords.get('ML_right')
 #     ap = coords.get('AP')
-    
+
 #     if ml_left is not None and ml_right is not None and ap is not None:
 #         ax.scatter(ml_left, ap, color=color, alpha=alpha, edgecolors='w', s=size)
 #         ax.scatter(ml_right, ap, color=color, alpha=alpha, edgecolors='w', s=size)
@@ -537,31 +541,31 @@ else:
 # for condition in range(NUM_STIM_LOCATIONS + 1):
 #     # Filter for low contrast trials in each block
 #     # Using absolute contrast < LOW_CONTRAST_THRESHOLD
-#     data_Lblock = [t for t in condition_data[condition] 
+#     data_Lblock = [t for t in condition_data[condition]
 #                    if abs(t['contrast']) < LOW_CONTRAST_THRESHOLD and t['probabilityLeft'] == 0.8]
-#     data_Rblock = [t for t in condition_data[condition] 
+#     data_Rblock = [t for t in condition_data[condition]
 #                    if abs(t['contrast']) < LOW_CONTRAST_THRESHOLD and t['probabilityLeft'] == 0.2]
-    
+
 #     # Determine number of complete cycles
 #     num_cycles = min(len(data_Lblock), len(data_Rblock)) // TRIALS_PER_DATAPOINT
-    
+
 #     if num_cycles == 0:
 #         continue
-    
+
 #     bias_vals = np.empty(num_cycles)
 #     bias_vals[:] = np.nan
-    
+
 #     for k in range(num_cycles):
 #         start_idx = k * TRIALS_PER_DATAPOINT
 #         end_idx = (k + 1) * TRIALS_PER_DATAPOINT
-        
+
 #         choices_L = [t['choice'] for t in data_Lblock[start_idx:end_idx]]
 #         choices_R = [t['choice'] for t in data_Rblock[start_idx:end_idx]]
-        
+
 #         mean_L = np.mean(choices_L)
 #         mean_R = np.mean(choices_R)
 #         bias_vals[k] = mean_L - mean_R  # Positive = more leftward in L block
-    
+
 #     bias_vals_by_condition[condition] = bias_vals
 
 # # Control bias statistics (for normalization)
@@ -575,16 +579,16 @@ else:
 
 # for cond in range(1, NUM_STIM_LOCATIONS + 1):
 #     stim_bias_vals = bias_vals_by_condition[cond]
-    
+
 #     if len(stim_bias_vals) > 0 and len(ctrl_bias_vals) > 0:
 #         # Independent t-test: stim vs control bias values
 #         _, p_val = stats.ttest_ind(ctrl_bias_vals, stim_bias_vals)
 #         bias_pvals[cond] = p_val
-        
+
 #         # Compute bias reduction as fraction of control bias eliminated
 #         # Positive value = bias reduced; 1 = bias eliminated; 0 = no change; negative = bias increased
 #         stim_mean_bias = np.mean(stim_bias_vals)
-        
+
 #         if ctrl_abs_mean_bias > 0:
 #             # Reduction = (ctrl - stim) / ctrl, but we want magnitude reduction
 #             # If ctrl_bias is positive (leftward bias in L block), reduction means stim_bias is smaller
@@ -619,20 +623,20 @@ else:
 #         continue
 #     if condition not in bias_pvals or np.isnan(bias_pvals.get(condition, np.nan)):
 #         continue
-    
+
 #     reduction = bias_reduction.get(condition, 0)
 #     p_val = bias_pvals[condition]
-    
+
 #     color = cmap_bias(norm_bias(reduction))
-    
+
 #     # Size based on -100 * log10(p_val) - matching RT/QP style
 #     size = -100 * np.log10(p_val) if p_val > 0 else 300
 #     alpha = 0.5 if p_val >= 0.05 else 1.0
-    
+
 #     ml_left = coords.get('ML_left')
 #     ml_right = coords.get('ML_right')
 #     ap = coords.get('AP')
-    
+
 #     if ml_left is not None and ml_right is not None and ap is not None:
 #         ax.scatter(ml_left, ap, color=color, alpha=alpha, s=size, edgecolors='w')
 #         ax.scatter(ml_right, ap, color=color, alpha=alpha, s=size, edgecolors='w')
@@ -680,13 +684,13 @@ else:
 
 # if SAVE_FIGURES:
 #     print("\nSaving analysis results...")
-    
+
 #     # Save bias arrays for further analysis
 #     np.save(FIGURE_SAVE_PATH / f'{FIGURE_PREFIX}_bias_vals_LC_control.npy', bias_vals_by_condition[0])
-    
+
 #     # Save effect sizes and statistics (including QP and bias reduction data)
 #     effect_size_df = pd.DataFrame([
-#         {'condition': c, 
+#         {'condition': c,
 #          'effect_size': effect_sizes.get(c, np.nan),
 #          'rt_mean': rt_means.get(c, np.nan),
 #          'rt_pval': rt_pvals.get(c, np.nan),
@@ -697,7 +701,7 @@ else:
 #         for c in range(1, NUM_STIM_LOCATIONS + 1)
 #     ])
 #     effect_size_df.to_csv(FIGURE_SAVE_PATH / f'{FIGURE_PREFIX}_results.csv', index=False)
-    
+
 #     print(f"Results saved to {FIGURE_SAVE_PATH}")
 
 

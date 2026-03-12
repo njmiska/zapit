@@ -15,7 +15,7 @@ from pathlib import Path
 # =============================================================================
 
 # Base directory for the project (update this to your local path)
-BASE_DIR = Path('/Users/natemiska/python/zapit')
+BASE_DIR = Path(__file__).parent
 
 # Zapit trial log file
 ZAPIT_TRIALS_LOG = BASE_DIR / 'zapit_trials.yml'
@@ -23,13 +23,12 @@ ZAPIT_TRIALS_LOG = BASE_DIR / 'zapit_trials.yml'
 # Zapit stimulation locations log (contains AP/ML coordinates)
 ZAPIT_LOCATIONS_LOG = BASE_DIR / 'zapit_log.yml'
 
-# Allen CCF atlas data (download from Allen Institute)
+# Allen CCF atlas data (downloaded from Allen Institute)
 # See: https://download.alleninstitute.org/informatics-archive/current-release/mouse_ccf/
-ALLEN_CCF_ANNOTATION = Path('/Users/natemiska/python/Allen/annotation_volume_10um.npy')
-ALLEN_STRUCTURE_TREE = Path('/Users/natemiska/python/Allen/structure_tree_safe_2017.csv')
+ALLEN_CCF_ANNOTATION = None  # Downloads to ONE directory by default
 
 # Output directory for figures
-FIGURE_SAVE_PATH = Path('/Users/natemiska/Desktop/zapit_check')
+FIGURE_SAVE_PATH = BASE_DIR
 
 # =============================================================================
 # SESSION FILTERING THRESHOLDS
@@ -116,7 +115,7 @@ BIAS_HEATMAP_CONTRASTS = [-6.25, 0, 6.25]
 # =============================================================================
 
 # IBL Alyx database URL
-ALYX_BASE_URL = 'https://alyx.internationalbrainlab.org'
+ALYX_BASE_URL = 'https://openalyx.internationalbrainlab.org'
 
 
 # =============================================================================
@@ -129,34 +128,34 @@ ALYX_BASE_URL = 'https://alyx.internationalbrainlab.org'
 
 SESSION_FILTERS = {
 
-    'Stimulation_Params': 'zapit',      
+    'Stimulation_Params': 'zapit',
     # Required for Zapit analysis
 
-    'Mouse_ID': lambda x: x in ['SWC_NM_072', 'SWC_NM_071', 'SWC_NM_057', 'SWC_NM_058', 'SWC_NM_081', 'SWC_NM_082', 'SWC_NM_085', 'SWC_NM_086', 'SWC_NM_090', 'SWC_NM_091'],                    
+    'Mouse_ID': lambda x: x in ['SWC_NM_072', 'SWC_NM_071', 'SWC_NM_057', 'SWC_NM_058', 'SWC_NM_081', 'SWC_NM_082', 'SWC_NM_085', 'SWC_NM_086', 'SWC_NM_090', 'SWC_NM_091'],
     # e.g., 'SWC_NM_099' or lambda x: x in [...]
-    
-    'Hemisphere': None,                  
+
+    'Hemisphere': None,
     # e.g., 'both', 'left', 'right'
 
-    'Pulse_Params': None,                
+    'Pulse_Params': None,
     # e.g., 'motor_bilateral_mask', '50hz'
 
-    'Opsin': None,                       
+    'Opsin': None,
     # e.g., 'ChR2', 'GtACR2'
 
-    'Genetic_Line': None,                
+    'Genetic_Line': None,
     # e.g., 'VGAT-ChR2', 'D1-Cre'
 
-    'Brain_Region': 'motor_bilateral',                
+    'Brain_Region': 'motor_bilateral',
     # e.g., 'motor_bilateral'
 
-    'Laser_V': None,                     
+    'Laser_V': None,
     # e.g., 2, or lambda x: x >= 1
 
-    'Date': None,                        
+    'Date': None,
     # e.g., '2024-10-24'
 
-    'EID': None,                         
+    'EID': None,
     # Specific session EID(s)
 }
 
